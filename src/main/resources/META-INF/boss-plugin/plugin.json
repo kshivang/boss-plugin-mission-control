@@ -1,0 +1,11 @@
+{
+  "id": "ai.rever.boss.plugin.dynamic.missioncontrol",
+  "name": "Mission Control",
+  "version": "0.1.0",
+  "description": "Shared human-agent workspace",
+  "author": "Risa Labs",
+  "pluginType": "DYNAMIC",
+  "mainClass": "ai.rever.boss.plugin.dynamic.missioncontrol.MissionControlDynamicPlugin",
+  "bossVersion": "1.0.0",
+  "apiVersion": "1.0.73"
+}
