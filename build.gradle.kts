@@ -77,6 +77,7 @@ dependencies {
     // at runtime; without it on the test classpath a logged warning throws
     // NoClassDefFoundError and masks the assertion that was actually failing.
     testRuntimeOnly("org.slf4j:slf4j-simple:2.0.18")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 tasks.test {
@@ -98,9 +99,6 @@ tasks.register<Jar>("buildPluginJar") {
 
     // Include compiled classes
     from(sourceSets.main.get().output)
-
-    // Include plugin manifest
-    from("src/main/resources")
 }
 
 // Sync version from build.gradle.kts into plugin.json (single source of truth)

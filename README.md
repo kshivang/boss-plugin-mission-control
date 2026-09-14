@@ -43,7 +43,9 @@ Mission Control operates via a standalone Compose Multiplatform panel and three 
 
 1. `mission_create(mission_id, goal)`: Establishes a new mission in the `RUNNING` state.
 2. `mission_update(mission_id, step, status)`: Updates the current execution step. Status defaults to `RUNNING`.
-3. `mission_handoff(mission_id, reason)`: Suspends the workflow and transitions the UI to `WAITING_FOR_HUMAN`.
+3. `mission_handoff(mission_id, reason)`: Suspends the workflow and transitions the UI to `WAITING_FOR_HUMAN`. Poll with the same mission and reason after `PENDING`. A human response is replayed until `mission_update` acknowledges it; call `mission_update` after `HUMAN_RESOLVED` before starting the next handoff.
+
+While a handoff awaits the human, updates cannot resume or complete the mission. `FAILED` and `CANCELLED` terminate the handoff. After any terminal outcome, `mission_create` may start a new mission with a new ID. Human UI actions refer to the mission/handoff that was displayed, so stale clicks cannot approve a later request.
 
 ## Example Workflow
 
@@ -58,19 +60,24 @@ create
 
 ## Limitations
 * **No OS Process Termination**: 'Cancel Mission' cancels the *mission state* and returns an error to the MCP tool. It does not send `SIGKILL` or `SIGINT` to the underlying OS process running the agent.
-* **One Active Mission**: The MVP supports exactly one active mission globally.
+* **One Active Mission**: The MVP supports exactly one active mission globally, shared by all callers of the provider. Mission IDs identify state; they are not authentication credentials.
 * **In-Memory State**: Mission state is transient and does not persist across application restarts.
+* **Cooperative Approval**: This is a workflow signal, not a security boundary that prevents an external agent from performing actions outside these tools.
 * **Cooperative Timeout/Polling**: The LLM must support handling `PENDING` states and re-polling.
 
 ## Installation
-Build the plugin from source:
+Build against the released API without a sibling API checkout:
 ```bash
-./gradlew buildPluginJar
+mkdir -p build/downloaded-deps
+gh release download v1.0.89 --repo risa-labs-inc/boss-plugin-api \
+  --pattern boss-plugin-api-1.0.89.jar --output build/downloaded-deps/boss-plugin-api.jar
+CI=true ./gradlew build
 ```
+The API JAR stays compile-only and is provided by the host at runtime. Local development without `CI=true` expects `../boss-plugin-api/build/libs/boss-plugin-api-1.0.89.jar`.
 Install the resulting JAR (`build/libs/mission-control-0.1.0.jar`) into your BOSS plugin directory.
 
 ## Testing
 Comprehensive test suites cover domain logic, synchronization, and MCP schema validation.
 ```bash
-./gradlew test
+CI=true ./gradlew test
 ```

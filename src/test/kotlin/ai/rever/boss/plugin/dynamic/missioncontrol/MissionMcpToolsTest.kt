@@ -13,6 +13,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.test.assertNull
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MissionMcpToolsTest {
@@ -175,7 +176,7 @@ class MissionMcpToolsTest {
         
         val result = deferredCall.await()
         assertFalse(result.isError)
-        assertTrue(result.text.contains("HUMAN_RESOLVED\nmission_id=m1\nresponse=Yes, approved.\nContinue the mission."))
+        assertTrue(result.text.contains("HUMAN_RESOLVED\nmission_id=m1\nresponse=Yes, approved.\nCall mission_update to acknowledge this response before the next handoff."))
     }
 
     // --- cancellation ---
@@ -232,4 +233,56 @@ class MissionMcpToolsTest {
         
         assertTrue(deferredCall.isCancelled)
     }
+    @Test
+    fun `agent cannot bypass human handoff by updating or completing`() = runTest {
+        val manager = MissionManager()
+        val tools = MissionMcpTools("test", manager, 50L)
+        manager.createMission("m1", "Goal")
+        getTool(tools, "mission_handoff").call(createArgs(mapOf("mission_id" to "m1", "reason" to "Approve?")))
+        for (status in listOf("RUNNING", "COMPLETED", "WAITING_FOR_HUMAN")) {
+            val result = getTool(tools, "mission_update").call(createArgs(mapOf("mission_id" to "m1", "step" to "Bypass", "status" to status)))
+            assertTrue(result.isError, status)
+            assertEquals(MissionStatus.WAITING_FOR_HUMAN, manager.state.value.activeMission!!.status)
+        }
+        manager.resolveHandoff("Approved")
+        val resumed = getTool(tools, "mission_update").call(createArgs(mapOf("mission_id" to "m1", "step" to "Resume")))
+        assertFalse(resumed.isError)
+        assertNull(manager.state.value.pendingHandoff)
+    }
+
+    @Test
+    fun `terminal MCP updates release pending calls without transient running state`() = runTest {
+        for (status in listOf("FAILED", "CANCELLED")) {
+            val manager = MissionManager()
+            val tools = MissionMcpTools("test", manager, 5000L)
+            manager.createMission("m1", "Goal")
+            val pending = async { getTool(tools, "mission_handoff").call(createArgs(mapOf("mission_id" to "m1", "reason" to "R"))) }
+            delay(1)
+            val result = getTool(tools, "mission_update").call(createArgs(mapOf("mission_id" to "m1", "step" to "Stopped", "status" to status)))
+            assertFalse(result.isError)
+            assertTrue(pending.await().isError)
+            assertEquals(MissionStatus.valueOf(status), manager.state.value.activeMission!!.status)
+            assertNull(manager.state.value.pendingHandoff)
+        }
+    }
+
+    @Test
+    fun `response survives timed out polls and is replayed until acknowledgement`() = runTest {
+        val manager = MissionManager()
+        val tools = MissionMcpTools("test", manager, 50L)
+        manager.createMission("m1", "Goal")
+        val handoff = getTool(tools, "mission_handoff")
+        val args = createArgs(mapOf("mission_id" to "m1", "reason" to "R"))
+        assertTrue(handoff.call(args).text.startsWith("PENDING"))
+        manager.resolveHandoff("Approved")
+        repeat(2) {
+            val result = handoff.call(args)
+            assertFalse(result.isError)
+            assertTrue(result.text.contains("response=Approved"))
+        }
+        getTool(tools, "mission_update").call(createArgs(mapOf("mission_id" to "m1", "step" to "Acknowledged")))
+        assertTrue(handoff.call(args).text.startsWith("PENDING"))
+        manager.dispose()
+    }
+
 }

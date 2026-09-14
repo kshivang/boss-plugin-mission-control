@@ -36,7 +36,7 @@ class MissionMcpTools(
         ),
         McpToolDefinition(
             name = "mission_update",
-            description = "Updates the active mission's step or status.",
+            description = "Updates the active mission's step or status. After HUMAN_RESOLVED, call this to acknowledge the response before starting another handoff.",
             inputSchema = UPDATE_SCHEMA,
             readOnly = false,
             handler = McpToolHandler { args ->
@@ -53,18 +53,7 @@ class MissionMcpTools(
                 }
 
                 try {
-                    if (status == MissionStatus.COMPLETED) {
-                        manager.updateMission(missionId, step, MissionStatus.RUNNING)
-                        manager.completeMission()
-                    } else if (status == MissionStatus.FAILED) {
-                        manager.updateMission(missionId, step, MissionStatus.RUNNING)
-                        manager.failMission()
-                    } else if (status == MissionStatus.CANCELLED) {
-                        manager.updateMission(missionId, step, MissionStatus.RUNNING)
-                        manager.cancelMission()
-                    } else {
-                        manager.updateMission(missionId, step, status)
-                    }
+                    manager.updateMission(missionId, step, status)
                     McpToolResult("MISSION_UPDATED\nmission_id=$missionId\nstatus=$status\nstep=$step")
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
@@ -90,7 +79,7 @@ class MissionMcpTools(
                     if (response == null) {
                         McpToolResult("PENDING\nmission_id=$missionId\nreason=Human has not responded yet.\nCall mission_handoff again with the same mission and reason.")
                     } else {
-                        McpToolResult("HUMAN_RESOLVED\nmission_id=$missionId\nresponse=$response\nContinue the mission.")
+                        McpToolResult("HUMAN_RESOLVED\nmission_id=$missionId\nresponse=$response\nCall mission_update to acknowledge this response before the next handoff.")
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e

@@ -251,4 +251,70 @@ class MissionManagerTest {
         val status = manager.state.value.activeMission!!.status
         assertTrue(status == MissionStatus.RUNNING || status == MissionStatus.CANCELLED)
     }
+    @Test
+    fun `new missions can follow every terminal outcome`() {
+        for (status in listOf(MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED)) {
+            val manager = MissionManager()
+            manager.createMission("old", "Old")
+            manager.updateMission("old", "Finished", status)
+            manager.createMission("new", "New")
+            assertEquals("new", manager.state.value.activeMission!!.missionId)
+            manager.cancelMission("old") // Stale UI callback must not cancel the replacement.
+            assertEquals(MissionStatus.RUNNING, manager.state.value.activeMission!!.status)
+        }
+    }
+
+    @Test
+    fun `disposed provider cannot resurrect an invisible mission`() {
+        val manager = MissionManager()
+        manager.dispose()
+        assertFailsWith<IllegalStateException> { manager.createMission("m1", "Goal") }
+    }
+
+    @Test
+    fun `stale approval cannot resolve another handoff`() = runTest {
+        val manager = MissionManager()
+        manager.createMission("m1", "Goal")
+        val first = launch { manager.requestHandoff("m1", "First") }
+        delay(1)
+        val old = manager.state.value.pendingHandoff!!
+        manager.resolveHandoff("OK", old)
+        first.join()
+        manager.updateMission("m1", "Next step")
+        val second = launch { manager.requestHandoff("m1", "Second") }
+        delay(1)
+        manager.resolveHandoff("Stale approval", old)
+        assertEquals(MissionStatus.WAITING_FOR_HUMAN, manager.state.value.activeMission!!.status)
+        assertTrue(!manager.state.value.pendingHandoff!!.responseDeferred.isCompleted)
+        manager.dispose()
+        second.join()
+    }
+
+    @Test
+    fun `cancel before approved response delivery prevents continuation`() = runTest {
+        val manager = MissionManager()
+        manager.createMission("m1", "Goal")
+        val pending = async { runCatching { manager.requestHandoff("m1", "R") } }
+        delay(1)
+        manager.resolveHandoff("OK")
+        manager.cancelMission()
+        assertTrue(pending.await().isFailure)
+    }
+
+    @Test
+    fun `parallel requests and resolution share one logical result`() = runTest {
+        repeat(50) {
+            val manager = MissionManager()
+            manager.createMission("m1", "Goal")
+            val requests = List(8) { async(kotlinx.coroutines.Dispatchers.Default) { manager.requestHandoff("m1", "R") } }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                while (manager.state.value.pendingHandoff == null) kotlinx.coroutines.yield()
+                manager.resolveHandoff("OK")
+            }
+            requests.forEach { assertEquals("OK", it.await()) }
+            manager.updateMission("m1", "Acknowledged")
+            assertNull(manager.state.value.pendingHandoff)
+        }
+    }
+
 }

@@ -3,191 +3,126 @@ package ai.rever.boss.plugin.dynamic.missioncontrol
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 
 class MissionManager {
-
     data class State(
         val activeMission: Mission? = null,
         val pendingHandoff: HandoffRequest? = null
     )
 
+    // Serialize transitions and their deferred completions. StateFlow.update lambdas
+    // can retry, so they must not capture side effects or select a deferred to complete.
+    private val lock = Any()
+    private var disposed = false
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
 
-    fun createMission(missionId: String, goal: String) {
+    fun createMission(missionId: String, goal: String) = synchronized(lock) {
+        check(!disposed) { "Mission Control is disposed" }
         require(missionId.isNotBlank()) { "missionId must not be blank" }
         require(goal.isNotBlank()) { "goal must not be blank" }
-
-        _state.update { current ->
-            if (current.activeMission != null) {
-                error("A mission is already active: ${current.activeMission.missionId}")
-            }
-            current.copy(
-                activeMission = Mission(
-                    missionId = missionId,
-                    goal = goal,
-                    step = "Initializing...",
-                    status = MissionStatus.RUNNING
-                )
-            )
+        val current = _state.value.activeMission
+        check(current == null || current.status.isTerminal()) {
+            "A mission is already active: ${current?.missionId}"
         }
+        check(current?.missionId != missionId) { "Use a new missionId for a new mission" }
+        _state.value = State(activeMission = Mission(missionId, goal, "Initializing...", MissionStatus.RUNNING))
     }
 
-    fun updateMission(missionId: String, step: String, status: MissionStatus = MissionStatus.RUNNING) {
-        _state.update { current ->
-            val mission = current.activeMission ?: error("No active mission")
-            if (mission.missionId != missionId) error("Unknown mission: $missionId")
-            if (mission.status in listOf(MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED)) {
-                error("Cannot update terminal mission")
-            }
+    fun updateMission(missionId: String, step: String, status: MissionStatus = MissionStatus.RUNNING) = synchronized(lock) {
+        require(step.isNotBlank()) { "step must not be blank" }
+        val mission = activeMission(missionId)
+        transition(mission, step, status)
+    }
 
-            if (status == MissionStatus.RUNNING) {
-                if (mission.status != MissionStatus.RUNNING && mission.status != MissionStatus.WAITING_FOR_HUMAN) {
-                    error("Invalid transition to RUNNING from ${mission.status}")
-                }
-            } else if (status == MissionStatus.WAITING_FOR_HUMAN) {
-                 if (mission.status != MissionStatus.WAITING_FOR_HUMAN) {
-                     error("Cannot transition to WAITING_FOR_HUMAN via updateMission")
-                 }
-            }
+    private fun activeMission(missionId: String? = null): Mission {
+        check(!disposed) { "Mission Control is disposed" }
+        val mission = _state.value.activeMission ?: error("No active mission")
+        check(missionId == null || mission.missionId == missionId) { "Unknown mission: $missionId" }
+        check(!mission.status.isTerminal()) { "Cannot update terminal mission" }
+        return mission
+    }
 
-            current.copy(
-                activeMission = mission.copy(step = step, status = status)
-            )
+    private fun transition(mission: Mission, step: String, status: MissionStatus) {
+        check(status != MissionStatus.WAITING_FOR_HUMAN) {
+            "Cannot transition to WAITING_FOR_HUMAN via updateMission"
+        }
+        val handoff = _state.value.pendingHandoff
+        if (status == MissionStatus.RUNNING || status == MissionStatus.COMPLETED) {
+            check(handoff == null || handoff.responseDeferred.isCompleted) {
+                "Human handoff must be resolved before continuing or completing"
+            }
+        }
+        _state.value = State(activeMission = mission.copy(step = step, status = status, handoffReason = null))
+        if (status == MissionStatus.FAILED || status == MissionStatus.CANCELLED) {
+            val message = if (status == MissionStatus.FAILED) "Mission failed" else "Mission cancelled"
+            handoff?.responseDeferred?.completeExceptionally(IllegalStateException(message))
         }
     }
 
     suspend fun requestHandoff(missionId: String, reason: String): String {
-        var handoff: HandoffRequest? = null
-        var shouldClearHandoff = false
-
-        _state.update { current ->
-            val mission = current.activeMission ?: error("No active mission")
-            if (mission.missionId != missionId) error("Unknown mission: $missionId")
-            
-            if (current.pendingHandoff != null) {
-                if (current.pendingHandoff.reason != reason) {
-                    error("Concurrent handoff collision: requested reason does not match active handoff")
+        require(reason.isNotBlank()) { "reason must not be blank" }
+        val handoff = synchronized(lock) {
+            val mission = activeMission(missionId)
+            val current = _state.value.pendingHandoff
+            if (current != null) {
+                check(current.reason == reason) {
+                    "Concurrent handoff collision: requested reason does not match active handoff"
                 }
-                handoff = current.pendingHandoff
-                
-                if (handoff.responseDeferred.isCompleted) {
-                    shouldClearHandoff = true
-                    return@update current.copy(pendingHandoff = null)
+                current
+            } else {
+                check(mission.status == MissionStatus.RUNNING) { "Cannot request handoff from state: ${mission.status}" }
+                HandoffRequest(reason).also {
+                    _state.value = State(mission.copy(status = MissionStatus.WAITING_FOR_HUMAN, handoffReason = reason), it)
                 }
-                
-                return@update current
-            }
-
-            if (mission.status != MissionStatus.RUNNING) {
-                error("Cannot request handoff from state: ${mission.status}")
-            }
-
-            val newHandoff = HandoffRequest(reason)
-            handoff = newHandoff
-
-            current.copy(
-                activeMission = mission.copy(status = MissionStatus.WAITING_FOR_HUMAN, handoffReason = reason),
-                pendingHandoff = newHandoff
-            )
-        }
-
-        val result = handoff?.responseDeferred?.await() ?: error("Handoff is null")
-        
-        // If this await actually suspended and we just woke up, we need to clear the pendingHandoff
-        // (if resolveHandoff hasn't already). Wait, resolveHandoff leaves pendingHandoff non-null 
-        // precisely so we can read it here or in a subsequent call.
-        // We can safely clear it now because we have the result.
-        if (!shouldClearHandoff) {
-            _state.update { current ->
-                if (current.pendingHandoff === handoff) {
-                    current.copy(pendingHandoff = null)
-                } else current
             }
         }
-        
-        return result
+        // Keep completed responses until mission_update acknowledges them. A timeout
+        // or disconnect can otherwise consume an approval without delivering it.
+        val response = handoff.responseDeferred.await()
+        synchronized(lock) {
+            val mission = _state.value.activeMission
+            check(!disposed && mission?.missionId == missionId && !mission.status.isTerminal()) {
+                "Mission ended before handoff response was delivered"
+            }
+        }
+        return response
     }
 
-    fun resolveHandoff(response: String) {
-        var resolvedHandoff: HandoffRequest? = null
-        
-        _state.update { current ->
-            val mission = current.activeMission
-            val handoff = current.pendingHandoff
-
-            if (mission == null || mission.status != MissionStatus.WAITING_FOR_HUMAN || handoff == null) {
-                return@update current
-            }
-
-            resolvedHandoff = handoff
-            current.copy(
-                activeMission = mission.copy(status = MissionStatus.RUNNING, handoffReason = null)
-                // We deliberately DO NOT clear pendingHandoff here, so that if the agent
-                // was timed out, its next poll will find it and collect the response.
-            )
-        }
-
-        resolvedHandoff?.responseDeferred?.complete(response)
+    fun resolveHandoff(response: String, expectedHandoff: HandoffRequest? = null) = synchronized(lock) {
+        val current = _state.value
+        val mission = current.activeMission
+        val handoff = current.pendingHandoff
+        if (disposed || mission?.status != MissionStatus.WAITING_FOR_HUMAN || handoff == null ||
+            (expectedHandoff != null && expectedHandoff !== handoff)) return@synchronized
+        _state.value = current.copy(activeMission = mission.copy(status = MissionStatus.RUNNING, handoffReason = null))
+        handoff.responseDeferred.complete(response)
     }
 
-    fun completeMission() {
-        _state.update { current ->
-            val mission = current.activeMission ?: error("No active mission")
-            if (mission.status != MissionStatus.RUNNING) {
-                error("Cannot complete mission from state: ${mission.status}")
-            }
-            current.copy(
-                activeMission = mission.copy(status = MissionStatus.COMPLETED)
-            )
-        }
+    fun completeMission() = synchronized(lock) {
+        val mission = activeMission()
+        transition(mission, mission.step, MissionStatus.COMPLETED)
     }
 
-    fun failMission() {
-        var handoffToCancel: HandoffRequest? = null
-        _state.update { current ->
-            val mission = current.activeMission ?: error("No active mission")
-            if (mission.status in listOf(MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED)) {
-                error("Mission already terminal")
-            }
-            handoffToCancel = current.pendingHandoff
-            current.copy(
-                activeMission = mission.copy(status = MissionStatus.FAILED),
-                pendingHandoff = null
-            )
-        }
-        handoffToCancel?.responseDeferred?.completeExceptionally(IllegalStateException("Mission failed"))
+    fun failMission() = synchronized(lock) {
+        val mission = activeMission()
+        transition(mission, mission.step, MissionStatus.FAILED)
     }
 
-    fun cancelMission() {
-        var handoffToCancel: HandoffRequest? = null
-        
-        _state.update { current ->
-            val mission = current.activeMission
-            if (mission == null || mission.status in listOf(MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED)) {
-                return@update current
-            }
-
-            handoffToCancel = current.pendingHandoff
-
-            current.copy(
-                activeMission = mission.copy(status = MissionStatus.CANCELLED),
-                pendingHandoff = null
-            )
-        }
-
-        handoffToCancel?.responseDeferred?.completeExceptionally(IllegalStateException("Mission cancelled"))
+    fun cancelMission(expectedMissionId: String? = null) = synchronized(lock) {
+        val mission = _state.value.activeMission
+        if (disposed || mission == null || mission.status.isTerminal() ||
+            (expectedMissionId != null && mission.missionId != expectedMissionId)) return@synchronized
+        transition(mission, mission.step, MissionStatus.CANCELLED)
     }
 
-    fun dispose() {
-        var handoffToCancel: HandoffRequest? = null
-        
-        _state.update { current ->
-            handoffToCancel = current.pendingHandoff
-            State()
-        }
-        
-        handoffToCancel?.responseDeferred?.cancel()
+    fun dispose() = synchronized(lock) {
+        disposed = true
+        val handoff = _state.value.pendingHandoff
+        _state.value = State()
+        handoff?.responseDeferred?.cancel()
     }
+
+    private fun MissionStatus.isTerminal() = this == MissionStatus.COMPLETED ||
+        this == MissionStatus.FAILED || this == MissionStatus.CANCELLED
 }

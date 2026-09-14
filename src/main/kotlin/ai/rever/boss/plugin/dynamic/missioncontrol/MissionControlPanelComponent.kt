@@ -52,7 +52,7 @@ class MissionControlPanelComponent(
                 if (mission == null) {
                     EmptyState()
                 } else {
-                    MissionStateView(mission)
+                    MissionStateView(mission, state.pendingHandoff)
                 }
             }
         }
@@ -72,14 +72,14 @@ class MissionControlPanelComponent(
     }
 
     @Composable
-    private fun MissionStateView(mission: Mission) {
+    private fun MissionStateView(mission: Mission, handoff: HandoffRequest?) {
         Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.Start
         ) {
             when (mission.status) {
                 MissionStatus.RUNNING -> RunningView(mission)
-                MissionStatus.WAITING_FOR_HUMAN -> WaitingView(mission)
+                MissionStatus.WAITING_FOR_HUMAN -> WaitingView(mission, handoff)
                 MissionStatus.COMPLETED -> CompletedView(mission)
                 MissionStatus.FAILED -> FailedView(mission)
                 MissionStatus.CANCELLED -> CancelledView(mission)
@@ -103,11 +103,11 @@ class MissionControlPanelComponent(
         
         Spacer(Modifier.height(32.dp))
         
-        CancelButton()
+        CancelButton(mission.missionId)
     }
 
     @Composable
-    private fun WaitingView(mission: Mission) {
+    private fun WaitingView(mission: Mission, handoff: HandoffRequest?) {
         Card(
             backgroundColor = BossThemeColors.WarningColor.copy(alpha = 0.1f),
             elevation = 0.dp,
@@ -143,7 +143,7 @@ class MissionControlPanelComponent(
         Spacer(Modifier.height(32.dp))
         
         Button(
-            onClick = { manager.resolveHandoff("Human approved. Continue.") },
+            onClick = { handoff?.let { manager.resolveHandoff("Human approved. Continue.", it) } },
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(
                 backgroundColor = BossThemeColors.AccentColor,
@@ -155,7 +155,7 @@ class MissionControlPanelComponent(
         
         Spacer(Modifier.height(16.dp))
         
-        CancelButton()
+        CancelButton(mission.missionId)
     }
 
     @Composable
@@ -191,9 +191,9 @@ class MissionControlPanelComponent(
     }
 
     @Composable
-    private fun CancelButton() {
+    private fun CancelButton(missionId: String) {
         OutlinedButton(
-            onClick = { manager.cancelMission() },
+            onClick = { manager.cancelMission(missionId) },
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.outlinedButtonColors(
                 contentColor = BossThemeColors.ErrorColor,

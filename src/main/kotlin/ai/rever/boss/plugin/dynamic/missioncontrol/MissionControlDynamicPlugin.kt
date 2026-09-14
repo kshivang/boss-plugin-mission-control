@@ -15,26 +15,43 @@ class MissionControlDynamicPlugin : DynamicPlugin {
     private var pluginContext: PluginContext? = null
 
     override fun register(context: PluginContext) {
+        check(pluginContext == null) { "Mission Control is already registered" }
         pluginContext = context
         val manager = MissionManager()
         missionManager = manager
-        
-        context.registerMcpToolProvider(MissionMcpTools(pluginId, manager))
-        
-        context.panelRegistry.registerPanel(MissionControlPanelInfo) { ctx, panelInfo ->
-            MissionControlPanelComponent(
-                ctx = ctx,
-                panelInfo = panelInfo,
-                manager = manager
-            )
+
+        try {
+            context.registerMcpToolProvider(MissionMcpTools(pluginId, manager))
+
+            context.panelRegistry.registerPanel(MissionControlPanelInfo) { ctx, panelInfo ->
+                MissionControlPanelComponent(
+                    ctx = ctx,
+                    panelInfo = panelInfo,
+                    manager = manager
+                )
+            }
+        } catch (failure: Throwable) {
+            try {
+                dispose()
+            } catch (cleanupFailure: Throwable) {
+                failure.addSuppressed(cleanupFailure)
+            }
+            throw failure
         }
     }
 
     override fun dispose() {
-        pluginContext?.panelRegistry?.unregisterPanel(MissionControlPanelInfo.id)
-        
-        missionManager?.dispose()
-        missionManager = null
+        val context = pluginContext
         pluginContext = null
+        try {
+            context?.unregisterMcpToolProvider(pluginId)
+        } finally {
+            try {
+                context?.panelRegistry?.unregisterPanel(MissionControlPanelInfo.id)
+            } finally {
+                missionManager?.dispose()
+                missionManager = null
+            }
+        }
     }
 }
